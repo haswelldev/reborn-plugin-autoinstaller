@@ -25,11 +25,9 @@ func main() {
 	logger.Info("startup: pid=%d", os.Getpid())
 
 	// ── Single-instance lock ──────────────────────────────────────────────
-	// Prevents two instances running in parallel (duplicate tray icons etc.)
 	mutexName, _ := windows.UTF16PtrFromString("RebornPluginAutoinstallerMutex")
 	mutex, mutexErr := windows.CreateMutex(nil, false, mutexName)
 	if mutexErr == windows.ERROR_ALREADY_EXISTS {
-		// Another instance is already running
 		logger.Warn("startup: another instance detected, exiting")
 		if mutex != 0 {
 			windows.CloseHandle(mutex)
@@ -81,17 +79,21 @@ func main() {
 		}
 	}
 
-	// ── Click Mode ────────────────────────────────────────────────────────
+	// ── Dispatch by mode ──────────────────────────────────────────────────
 	if cfg.RunMode == "click" {
 		logger.Info("mode: click")
 		runClickMode(cfg)
-		return
+	} else {
+		logger.Info("mode: tray")
+		runTrayMode(cfg)
 	}
 
-	// ── Tray Mode ─────────────────────────────────────────────────────────
-	logger.Info("mode: tray")
-	runTrayMode(cfg)
+	// Ensure the process always terminates cleanly.
+	// (CGO + walk message pump can occasionally leave stale goroutines.)
+	os.Exit(0)
 }
+
+// ── Click Mode ────────────────────────────────────────────────────────────────
 
 func runClickMode(cfg *config.Config) {
 	logger.Info("click: installing %s (lang=%s)", cfg.PluginName, cfg.PluginLang)
@@ -116,6 +118,8 @@ func runClickMode(cfg *config.Config) {
 	})
 }
 
+// ── Tray Mode ─────────────────────────────────────────────────────────────────
+
 func runTrayMode(cfg *config.Config) {
 	pumpWindow, err := walk.NewMainWindow()
 	if err != nil {
@@ -125,37 +129,53 @@ func runTrayMode(cfg *config.Config) {
 	logger.Debug("tray: pump window created")
 
 	settingsOpen := false
+	switchedToClick := false // set when user changes mode → click inside settings
 
 	openSettings := func() {
 		if settingsOpen {
 			return
 		}
 		settingsOpen = true
+
+		// Capture mode at the moment settings window opens.
+		modeBeforeOpen := cfg.RunMode
+
 		ui.RunSettingsWindow(cfg, nil, func(newCfg *config.Config) error {
-			prevLang := cfg.PluginLang
 			*cfg = *newCfg
 			if err := cfg.Save(); err != nil {
 				return err
 			}
-			// Restart watcher if the watched path changed
-			if cfg.PluginLang != prevLang || cfg.GameDir != newCfg.GameDir {
-				watcher.Stop()
-				if cfg.RunMode == "tray" {
-					if err := startWatcher(pumpWindow, cfg); err != nil {
-						logger.Error("tray: watcher restart: %v", err)
-					}
+			// Always re-evaluate the watcher on save (mode, lang or dir may have changed).
+			watcher.Stop()
+			if cfg.RunMode == "tray" {
+				if err := startWatcher(pumpWindow, cfg); err != nil {
+					logger.Error("tray: watcher restart: %v", err)
 				}
 			}
 			return nil
 		})
+
 		settingsOpen = false
+
+		// After the settings window is closed, check whether the user switched
+		// from Tray → Click. If so, tear everything down and fall through to
+		// runClickMode() after the pump exits.
+		if modeBeforeOpen == "tray" && cfg.RunMode == "click" {
+			logger.Info("tray: mode switched to click, tearing down tray")
+			switchedToClick = true
+			watcher.Stop()
+			tray.Dispose()
+			// Schedule pump closure on the UI goroutine.
+			pumpWindow.Synchronize(func() { pumpWindow.Close() })
+		}
 	}
 
+	// Quit: stop everything and exit the process immediately.
 	quit := func() {
-		logger.Info("tray: quitting")
+		logger.Info("tray: quit requested")
 		watcher.Stop()
 		tray.Dispose()
-		pumpWindow.Close()
+		os.Exit(0) // os.Exit is the only reliable way to terminate when CGO is involved
 	}
 
 	if err := tray.Init(pumpWindow, openSettings, quit); err != nil {
@@ -165,12 +185,18 @@ func runTrayMode(cfg *config.Config) {
 
 	if err := startWatcher(pumpWindow, cfg); err != nil {
 		logger.Error("tray: initial watcher start: %v", err)
-		// Non-fatal: show notification so user knows
 		tray.ShowBalloon("Watch Error",
 			"Could not watch plugin file: "+err.Error()+"\nCheck Settings.")
 	}
 
-	pumpWindow.Run()
+	pumpWindow.Run() // blocks until pump window closes
+
+	// If the user switched to Click mode inside Settings, run click mode now
+	// (tray icon and watcher are already stopped above).
+	if switchedToClick {
+		logger.Info("tray→click: running click mode")
+		runClickMode(cfg)
+	}
 }
 
 func startWatcher(pump *walk.MainWindow, cfg *config.Config) error {
