@@ -1,13 +1,16 @@
-name: Build Windows Installer
+name: Build & Release
 
 on:
   push:
     tags: ['v*']
   workflow_dispatch:
 
+permissions:
+  contents: write   # required to create GitHub Releases
+
 jobs:
   build:
-    runs-on: ubuntu-latest        # Linux has a working makensis
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -16,7 +19,7 @@ jobs:
         with:
           go-version: '1.22'
 
-      - name: Install dependencies
+      - name: Install build dependencies
         run: |
           sudo apt-get update -q
           sudo apt-get install -y gcc-mingw-w64-x86-64 nsis
@@ -47,8 +50,24 @@ jobs:
       - name: Build NSIS installer
         run: makensis installer.nsi
 
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: windows-build
-          path: dist/
+          name: "Reborn Plugin Autoinstaller ${{ github.ref_name }}"
+          body: |
+            ## Reborn Plugin Autoinstaller ${{ github.ref_name }}
+
+            Automatically installs your Lineage Reborn colored chat plugin after game client updates.
+
+            ### Downloads
+            | File | Description |
+            |------|-------------|
+            | `RebornPluginAutoinstaller-Setup.exe` | **Recommended** — installer with Start Menu & Desktop shortcuts |
+            | `reborn-plugin-autoinstaller.exe` | Portable — run directly, no installation needed |
+
+            ### First run
+            On first launch the setup wizard will ask for your game folder, plugin and run mode (Click or Tray).
+          files: |
+            dist/reborn-plugin-autoinstaller.exe
+            dist/RebornPluginAutoinstaller-Setup.exe
+          fail_on_unmatched_files: true
