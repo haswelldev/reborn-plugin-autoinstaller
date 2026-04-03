@@ -72,9 +72,10 @@ func (ws *watcherState) loop(cfg *config.Config, onResult func(err error)) {
 				continue
 			}
 
-			// Cooldown guard — skip events caused by our own previous install.
-			// When copyFile() writes to the destination, fsnotify fires a Write
-			// event on that same file. Without this guard we'd loop forever.
+			// Cooldown guard — cheap first line of defence against the write-back
+			// loop: our own copyFile() emits a Write event on the watched file.
+			// The hash check below is the authoritative guard, but the cooldown
+			// avoids even opening files during the immediate feedback window.
 			elapsed := time.Since(ws.lastInstallAt)
 			if elapsed < installCooldown {
 				logger.Debug("watcher: skipping event (cooldown, %v remaining)",
@@ -82,7 +83,17 @@ func (ws *watcherState) loop(cfg *config.Config, onResult func(err error)) {
 				continue
 			}
 
-			logger.Info("watcher: destination file changed, reinstalling plugin")
+			// Hash check — compare the destination file against the selected
+			// plugin source. If they are already identical the user either
+			// copied the file manually or the previous install is still in
+			// place; no action needed.
+			match, srcHash, dstHash := installer.DestMatchesSource(cfg)
+			if match {
+				logger.Debug("watcher: dest already matches plugin (sha256=%s), skipping", srcHash)
+				continue
+			}
+			logger.Info("watcher: dest changed (dst=%s src=%s), reinstalling", dstHash, srcHash)
+
 			ws.lastInstallAt = time.Now()
 
 			err := installer.Install(cfg)

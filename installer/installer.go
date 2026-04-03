@@ -1,6 +1,8 @@
 package installer
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -164,6 +166,40 @@ func copyFile(src, dst string) error {
 		return fmt.Errorf("copy: %w", err)
 	}
 	return out.Sync()
+}
+
+// HashFile returns the hex-encoded SHA-256 hash of the file at path.
+// Returns an empty string and an error if the file cannot be read.
+func HashFile(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// DestMatchesSource returns true when the destination file already has the
+// same SHA-256 hash as the source plugin file — meaning no install is needed.
+// If either file cannot be read, false is returned so we fall back to installing.
+func DestMatchesSource(cfg *config.Config) (bool, string, string) {
+	src := SourcePath(cfg.GameDir, cfg.PluginName, cfg.PluginLang)
+	dst := DestPath(cfg.GameDir, cfg.PluginLang)
+
+	srcHash, err := HashFile(src)
+	if err != nil {
+		return false, "", ""
+	}
+	dstHash, err := HashFile(dst)
+	if err != nil {
+		return false, srcHash, ""
+	}
+	return srcHash == dstHash, srcHash, dstHash
 }
 
 func isEBusy(err error) bool {
