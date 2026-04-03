@@ -1,0 +1,16 @@
+# Build outputs
+dist/
+
+# Generated Windows resource blob (produced by rsrc during build)
+rsrc.syso
+
+# Go build cache
+*.test
+*.out
+
+# IDE / OS / tools
+.idea/
+.vscode/
+.claude/
+.DS_Store
+Thumbs.db
