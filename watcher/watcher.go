@@ -4,6 +4,7 @@ package watcher
 
 import (
 	"sync"
+	"time"
 
 	"github.com/fsnotify/fsnotify"
 
@@ -12,17 +13,23 @@ import (
 	"github.com/athened/reborn-plugin-autoinstaller/logger"
 )
 
+// installCooldown is the minimum time that must elapse between two installs.
+// This prevents a feedback loop: our own copyFile() write to the destination
+// file emits a fsnotify Write event — without the cooldown that would
+// immediately trigger another install, and so on forever.
+const installCooldown = 3 * time.Second
+
 type watcherState struct {
-	mu      sync.Mutex
-	fw      *fsnotify.Watcher
-	running bool
+	mu            sync.Mutex
+	fw            *fsnotify.Watcher
+	running       bool
+	lastInstallAt time.Time
 }
 
 var state *watcherState
 
 // Start begins watching the destination .dat file for external changes.
-// onResult is called on the caller's goroutine (via the pump window's Synchronize)
-// each time a change is detected and an install is attempted.
+// onResult is called (via the pump window's Synchronize) after each install attempt.
 func Start(cfg *config.Config, onResult func(err error)) error {
 	Stop()
 
@@ -58,14 +65,26 @@ func (ws *watcherState) loop(cfg *config.Config, onResult func(err error)) {
 				return
 			}
 
-			logger.Debug("watcher: event %v op=%v", event.Name, event.Op)
+			logger.Debug("watcher: event op=%v file=%s", event.Op, event.Name)
 
-			// React only to Write or Create (game client overwrites/replaces the file)
+			// Only react to Write or Create (game client overwrites / replaces the file)
 			if event.Op&(fsnotify.Write|fsnotify.Create) == 0 {
 				continue
 			}
 
+			// Cooldown guard — skip events caused by our own previous install.
+			// When copyFile() writes to the destination, fsnotify fires a Write
+			// event on that same file. Without this guard we'd loop forever.
+			elapsed := time.Since(ws.lastInstallAt)
+			if elapsed < installCooldown {
+				logger.Debug("watcher: skipping event (cooldown, %v remaining)",
+					installCooldown-elapsed)
+				continue
+			}
+
 			logger.Info("watcher: destination file changed, reinstalling plugin")
+			ws.lastInstallAt = time.Now()
+
 			err := installer.Install(cfg)
 			if err != nil {
 				logger.Error("watcher: install failed: %v", err)
